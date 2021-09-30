@@ -19330,7 +19330,6 @@ a footnote definition, try to fill the first paragraph within."
 			 (org-element-property :contents-end element))))
 	   ;; Do nothing if point is at an affiliated keyword.
 	   (if (< (line-end-position) beg) t
-	     ;; Fill paragraph, taking line breaks into account.
 	     (save-excursion
 	       (goto-char beg)
 	       (let ((cuts (list beg)))
