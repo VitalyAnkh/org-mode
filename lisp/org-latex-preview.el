@@ -229,6 +229,12 @@ of the Emacs session."
   :package-version '(Org . "9.7")
   :type 'boolean)
 
+(defcustom org-latex-preview-numbered nil
+  "Whether to calculate and apply correct equation numbering."
+  :group 'org-latex
+  :package-version '(Org . "9.7")
+  :type 'boolean)
+
 (defface org-latex-preview-processing-face '((t :inherit shadow))
   "Face applied to LaTeX fragments for which a preview is being generated."
   :group 'org-faces)
@@ -537,9 +543,11 @@ This is intended to be placed in `post-command-hook'."
                        fragments))))))
     (when (setq fragments (delq nil fragments))
       (when (and org-latex-preview-numbered
-                 (cl-some (lambda (datum)
-                            (eq (org-element-type datum) 'latex-environment))
-                          fragments))
+                 ;; This is a nice way of quickly checking for a type
+                 ;; across all elements, but it does assume that
+                 ;; every element is well formed, more so than
+                 ;; `org-element-type' in fact.
+                 (memq 'latex-environment (mapcar #'car fragments)))
         (setq fragments
               (append fragments
                       (org-latex-preview--get-numbered-environments
@@ -884,6 +892,13 @@ Some of the options can be changed using the variable
   (let* ((processing-info
           (cdr (assq processing-type org-latex-preview-process-alist)))
          (imagetype (or (plist-get processing-info :image-output-type) "png"))
+         (numbering-table (and org-latex-preview-numbered
+                               ;; This is a nice way of quickly checking for a type
+                               ;; across all elements, but it does assume that
+                               ;; every element is well formed, more so than
+                               ;; `org-element-type' in fact.
+                               (memq 'latex-environment (mapcar #'car elements))
+                               (org-latex-preview--environment-numbering-table)))
          fragment-info prev-fg prev-bg)
     (save-excursion
       (dolist (element elements)
@@ -895,12 +910,16 @@ Some of the options can be changed using the variable
                                  1 0)))
                      (value (org-element-property :value element))
                      (`(,fg ,bg) (org-latex-preview--colors-at beg))
+                     (number (and numbering-table
+                                  (eq (org-element-type element) 'latex-environment)
+                                  (gethash element numbering-table)))
                      (hash (org-latex-preview--hash
-                            processing-type value imagetype fg bg))
+                            processing-type value imagetype fg bg number))
                      (options (org-combine-plists
                                org-latex-preview-options
                                (list :foreground fg
                                      :background bg
+                                     :number number
                                      :continue-color
                                      (and (equal prev-bg bg)
                                           (equal prev-fg fg))))))
@@ -955,7 +974,7 @@ This is surprisingly complicated given the various forms of output
     ;; A single-face spec, like org-level-1.
     (face-attribute face attr nil 'default)))
 
-(defun org-latex-preview--hash (processing-type string imagetype fg bg)
+(defun org-latex-preview--hash (processing-type string imagetype fg bg &optional number)
   "Return a SHA1 hash for referencing LaTeX fragments when previewing them.
 
 PROCESSING-TYPE is the type of process used to create the
@@ -968,7 +987,9 @@ IMAGETYPE is the type of image to be created, see
 `org-latex-preview-process-alist'.
 
 FG and BG are the foreground and background colors for the
-image."
+image.
+
+NUMBER is the equation number that should be used, if applicable."
   (sha1 (prin1-to-string
          (list processing-type
                org-latex-preview-header
@@ -978,7 +999,67 @@ image."
                string
                (if (equal imagetype "svg")
                    'svg fg)
-               bg))))
+               bg
+               number))))
+
+(defconst org-latex-preview--numbered-environments
+  '("equation" "eqnarray" "math" "displaymath" ; latex.ltx
+    "align" "gather" "multiline" "flalign" "alignat" ; amsmath.sty
+    "xalignat" "xxalignat" "subequations" ; amsmath.sty
+    "dmath" "dseries" "dgroup" "darray" ; breqn.sty
+    "empheq") ; empheq.sty
+  "List of LaTeX environments which produce numbered equations.")
+
+(defun org-latex-preview--environment-numbering-table ()
+  "Creat a hash table from numbered equations to their initial index."
+  (let ((table (make-hash-table :test (if (org-element--cache-active-p)
+                                          #'eq #'equal)))
+        (counter 1))
+    (save-match-data
+      (dolist (element (org-latex-preview--get-numbered-environments))
+        (let ((content (org-element-property :value element)))
+          (puthash element counter table)
+          (if (string-match-p "\\`\\\\begin{[^}]*align" content)
+              (let ((beg (org-element-property :begin element))
+                    (end (org-element-property :end element)))
+                (cl-incf counter (1+ (how-many "\\\\$" beg end)))
+                (cl-decf counter (how-many "\\nonumber" beg end))
+                (cl-decf counter (how-many "\\tag{" beg end)))
+            (unless (or (string-match-p "\\nonumber" content)
+                        (string-match-p "\\tag{" content))
+              (cl-incf counter))))))
+    table))
+
+(defun org-latex-preview--get-numbered-environments (&optional beg end)
+  "Find all numbered environments between BEG and END."
+  (if (org-element--cache-active-p)
+      (org-element-cache-map
+       (lambda (datum)
+         (and (<= (or beg (point-min)) (org-element-property :begin datum)
+                  (org-element-property :end datum) (or end (point-max)))
+              (let* ((content (org-element-property :value datum))
+                     (env (and (string-match "\\`\\\\begin{\\([^}]+\\)}" content)
+                               (match-string 1 content))))
+                (and (member env org-latex-preview--numbered-environments)
+                     datum))))
+       :granularity 'element
+       :restrict-elements '(latex-environment)
+       :from-pos beg
+       :to-pos (or end (point-max-marker)))
+    (org-element-map
+        (org-element-parse-buffer 'element)
+        '(latex-environment)
+      (lambda (datum)
+        (and (<= (or beg (point-min)) (org-element-property :begin datum)
+                 (org-element-property :end datum) (or end (point-max)))
+             (message "elt!")
+             (let* ((content (org-element-property :value datum))
+                    (env (and (string-match "\\`\\\\begin{\\([^}]+\\)}" content)
+                              (match-string 1 content))))
+               (and (member env org-latex-preview--numbered-environments)
+                    (save-excursion
+                      (goto-char (org-element-property :begin datum))
+                      (org-element-context)))))))))
 
 (defun org-latex-preview-create-image-async (processing-type fragments-info)
   "Preview PREVIEW-STRINGS asynchronously with method PROCESSING-TYPE.
@@ -1382,20 +1463,20 @@ tests with the output of dvisvgm."
         (path (plist-get svg-fragment :path)))
     (when path
       (with-temp-buffer
-      (insert-file-contents path)
-      (goto-char (point-min))
-      (if (re-search-forward "<svg[^>]*>\n<g[^>]*>\n</svg>" nil t)
-          ;; We never want to show an empty SVG, instead it is better to delete
-          ;; it and leave the LaTeX fragment without an image overlay.
-          ;; This also works better with other parts of the system, such as
-          ;; the display of errors.
-          (delete-file path)
-        (when (re-search-forward "<g fill='\\(#[0-9a-f]\\{6\\}\\)'" nil t)
-          (let* ((same-color (format "\\(?:fill\\|stroke\\)='\\(%s\\)'" (match-string 1))))
-            (replace-match "currentColor" t t nil 1)
-            (while (re-search-forward same-color nil t)
-              (replace-match "currentColor" t t nil 1)))
-          (write-region nil nil path nil 0)))))))
+        (insert-file-contents path)
+        (goto-char (point-min))
+        (if (re-search-forward "<svg[^>]*>\n<g[^>]*>\n</svg>" nil t)
+            ;; We never want to show an empty SVG, instead it is better to delete
+            ;; it and leave the LaTeX fragment without an image overlay.
+            ;; This also works better with other parts of the system, such as
+            ;; the display of errors.
+            (delete-file path)
+          (when (re-search-forward "<g fill='\\(#[0-9a-f]\\{6\\}\\)'" nil t)
+            (let* ((same-color (format "\\(?:fill\\|stroke\\)='\\(%s\\)'" (match-string 1))))
+              (replace-match "currentColor" t t nil 1)
+              (while (re-search-forward same-color nil t)
+                (replace-match "currentColor" t t nil 1)))
+            (write-region nil nil path nil 0)))))))
 
 (defconst org-latex-preview--dvipng-dpi-pt-factor 0.5144
   "Factor that converts dvipng reported depth at 140 DPI to pt.
@@ -1486,8 +1567,8 @@ enabled, see `org-latex-preview-persist'."
       (setq org-latex-preview--table (make-hash-table :test 'equal :size 240)))
     (when-let ((path)
                (new-path (expand-file-name
-                     (concat "org-tex-" key "." (file-name-extension path))
-                     temporary-file-directory)))
+                          (concat "org-tex-" key "." (file-name-extension path))
+                          temporary-file-directory)))
       (copy-file path new-path 'replace)
       (puthash key (cons new-path info)
                org-latex-preview--table))))
@@ -1566,15 +1647,22 @@ the *entire* preview cache will be cleared."
            (or (plist-get (alist-get org-latex-preview-default-process
                                      org-latex-preview-process-alist)
                           :image-output-type)
-               "png")))
+               "png"))
+          (numbering-table
+           (and org-latex-preview-numbered
+                (org-latex-preview--environment-numbering-table))))
       (dolist (element (org-latex-preview-collect-fragments beg end))
         (pcase-let* ((begin (org-element-property :begin element))
                      (`(,fg ,bg) (org-latex-preview--colors-at begin))
-                     (value (org-element-property :value element)))
+                     (value (org-element-property :value element))
+                     (number (and numbering-table
+                                  (eq (org-element-type element)
+                                      'latex-environment)
+                                  (gethash element numbering-table))))
           (org-latex-preview--remove-cached
            (org-latex-preview--hash
             org-latex-preview-default-process
-            value imagetype fg bg))))
+            value imagetype fg bg number))))
       (message "Cleared LaTeX preview cache for %s."
                (if (or beg end) "region" "buffer")))))
 
@@ -1654,7 +1742,8 @@ HTML-P, if true, uses colors required for HTML processing."
          (bg (pcase (plist-get options (if html-p :html-background :background))
                ('default (org-latex-preview--attr-color :background))
                ("Transparent" nil)
-               (bg (org-latex-preview--format-color bg)))))
+               (bg (org-latex-preview--format-color bg))))
+         (num (plist-get options :number)))
     (concat (and (not (plist-get options :continue-color))
                  (if (eq processing-type 'dvipng)
                      (concat (and fg (format "\\special{color rgb %s}"
@@ -1666,6 +1755,7 @@ HTML-P, if true, uses colors required for HTML processing."
                    (concat
                     (and bg (format "\\pagecolor[rgb]{%s}" bg))
                     (and fg (format "\\color[rgb]{%s}" fg)))))
+            (and num (format "\\setcounter{equation}{%d}" (1- num)))
             "%\n"
             value)))
 
