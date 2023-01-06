@@ -1399,14 +1399,14 @@ the *entire* preview cache will be cleared."
   (interactive (let ((context (org-element-context)))
                  (cond
                   (current-prefix-arg
-                   '(nil nil t))
+                   (list nil nil (y-or-n-p "This will clear the systemwide LaTeX preview cache, continue? ")))
                   ((use-region-p)
                    (list (region-beginning) (region-end)))
                   ((memq (org-element-type context)
                          '(latex-fragment latex-environment))
                    (list (org-element-property :begin context)
                          (org-element-property :end context)))
-                  (t (list (point-min) (point-max))))))
+                  (t (list nil nil)))))
   (org-latex-preview-clear-overlays beg end)
   (if clear-entire-cache
       (let ((n 0))
@@ -1419,10 +1419,11 @@ the *entire* preview cache will be cleared."
         (if (> n 0)
             (message "Cleared all %d entries fom the Org LaTeX preview cache." n)
           (message "The Org LaTeX preview cache was already empty.")))
-    (let* ((imagetype (or (plist-get (alist-get org-latex-preview-default-process
-                                                org-latex-preview-process-alist)
-                                     :image-output-type)
-                          "png")))
+    (let ((imagetype
+           (or (plist-get (alist-get org-latex-preview-default-process
+                                     org-latex-preview-process-alist)
+                          :image-output-type)
+               "png")))
       (dolist (element (org-latex-preview-collect-fragments beg end))
         (pcase-let* ((begin (org-element-property :begin element))
                      (`(,fg ,bg) (org-latex-preview--colors-at begin))
@@ -1430,9 +1431,9 @@ the *entire* preview cache will be cleared."
           (org-latex-preview--remove-cached
            (org-latex-preview--hash
             org-latex-preview-default-process
-            value
-            imagetype
-            fg bg)))))))
+            value imagetype fg bg))))
+      (message "Cleared LaTeX preview cache for %s."
+               (if (or beg end) "region" "buffer")))))
 
 ;; TODO: Switching processes from imagemagick to dvi* with an existing
 ;; dump-file during a single Emacs session should trigger
