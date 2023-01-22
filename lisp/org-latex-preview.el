@@ -648,7 +648,7 @@ This is intended to be placed in `post-command-hook'."
                 (append fragments
                         (org-latex-preview--get-numbered-environments
                          end nil))))
-        (org-latex-preview--create
+        (org-latex-preview--place-from-elements
          org-latex-preview-default-process
          fragments)))))
 
@@ -730,7 +730,7 @@ image.  The preview image is regenerated if necessary."
                         (eq (org-element-type fragment) 'latex-environment)
                         (org-latex-preview--get-numbered-environments
                          (overlay-end ov) nil))))
-      (org-latex-preview--create
+      (org-latex-preview--place-from-elements
        org-latex-preview-default-process
        (append (list fragment) others)))))
 
@@ -989,7 +989,7 @@ protection against placing doubled up overlays."
               'org-latex-overlay)
     (let ((ws (window-start)))
       (if (assq processing-type org-latex-preview-process-alist)
-          (org-latex-preview--create
+          (org-latex-preview--place-from-elements
            processing-type
            (nconc (org-latex-preview-collect-fragments (max ws beg) end)
                   (when (< beg ws)
@@ -1017,32 +1017,55 @@ Some of the options can be changed using the variable
       (org-latex-preview-fragments processing-type beg end)
     (org-latex-preview-replace-fragments prefix processing-type dir msg)))
 
-(defun org-latex-preview--create (processing-type elements)
+(defun org-latex-preview--place-from-elements (processing-type elements)
   "Preview LaTeX math fragments ELEMENTS using PROCESSING-TYPE."
-  (let* ((processing-info
-          (cdr (assq processing-type org-latex-preview-process-alist)))
-         (imagetype (or (plist-get processing-info :image-output-type) "png"))
-         (numbering-table (and org-latex-preview-numbered
+  (let* ((numbering-table (and org-latex-preview-numbered
                                ;; This is a nice way of quickly checking for a type
                                ;; across all elements, but it does assume that
                                ;; every element is well formed, more so than
                                ;; `org-element-type' in fact.
                                (memq 'latex-environment (mapcar #'car elements))
                                (org-latex-preview--environment-numbering-table)))
+         (numbering-offsets
+          (and numbering-table
+               (mapcar
+                (lambda (element)
+                  (and numbering-table
+                       (eq (org-element-type element) 'latex-environment)
+                       (gethash element numbering-table)))
+                elements)))
+         (entries
+          (mapcar
+           (lambda (element)
+             (list (org-element-property :begin element)
+                   (- (org-element-property :end element)
+                      (or (org-element-property :post-blank element) 0)
+                      (if (eq (char-before (org-element-property :end element))
+                              ?\n)
+                          1 0))
+                   (org-element-property :value element)))
+           elements)))
+    (org-latex-preview-place processing-type entries numbering-offsets)))
+
+(defun org-latex-preview-place (processing-type entries &optional numbering-offsets latex-header)
+  "Preview LaTeX math fragments ENTRIES using PROCESSING-TYPE.
+Each entry of ENTRIES should be a list of 2-3 items, either
+  (BEG END), or
+  (BEG END VALUE)
+Where BEG and END are the positions in the buffer, and the LaTeX previewed
+is either the substring between BEG and END or (when provided) VALUE."
+  (let* ((processing-info
+          (cdr (assq processing-type org-latex-preview-process-alist)))
+         (imagetype (or (plist-get processing-info :image-output-type) "png"))
+         (numbering-offsets (cons nil numbering-offsets))
          fragment-info prev-fg prev-bg)
     (save-excursion
-      (dolist (element elements)
-        (pcase-let* ((beg (org-element-property :begin element))
-                     (end (- (org-element-property :end element)
-                             (or (org-element-property :post-blank element) 0)
-                             (if (eq (char-before (org-element-property :end element))
-                                     ?\n)
-                                 1 0)))
-                     (value (org-element-property :value element))
+      (dolist (entry entries)
+        (pcase-let* ((`(,beg ,end ,provided-value) entry)
+                     (value (or provided-value
+                                (buffer-substring-no-properties beg end)))
                      (`(,fg ,bg) (org-latex-preview--colors-at beg))
-                     (number (and numbering-table
-                                  (eq (org-element-type element) 'latex-environment)
-                                  (gethash element numbering-table)))
+                     (number (car (setq numbering-offsets (cdr numbering-offsets))))
                      (hash (org-latex-preview--hash
                             processing-type value imagetype fg bg number))
                      (options (org-combine-plists
@@ -1064,9 +1087,10 @@ Some of the options can be changed using the variable
                   fragment-info))
           (setq prev-fg fg prev-bg bg))))
     (if fragment-info
-        (org-latex-preview-create-image-async
+        (org-latex-preview--create-image-async
          processing-type
-         (nreverse fragment-info))
+         (nreverse fragment-info)
+         latex-header)
       (message "Creating LaTeX previews... done."))))
 
 (defun org-latex-preview--colors-at (pos)
@@ -1198,7 +1222,7 @@ NUMBER is the equation number that should be used, if applicable."
                       (goto-char (org-element-property :begin datum))
                       (org-element-context)))))))))
 
-(defun org-latex-preview-create-image-async (processing-type fragments-info &optional latex-processor)
+(defun org-latex-preview--create-image-async (processing-type fragments-info &optional latex-processor latex-header)
   "Preview PREVIEW-STRINGS asynchronously with method PROCESSING-TYPE.
 
 FRAGMENTS-INFO is a list of plists, each of which provides
@@ -1224,7 +1248,8 @@ LATEX-PROCESSOR is a member of `org-latex-compilers' which is guessed if unset."
                                 '("LATEX_COMPILER") '("LATEX_COMPILER")))))
               org-latex-compiler))
          (processing-info
-          (nconc (list :latex-processor latex-processor)
+          (nconc (list :latex-processor latex-processor
+                       :latex-header latex-header)
                  (alist-get processing-type org-latex-preview-process-alist)))
          (programs (plist-get processing-info :programs))
          (error-message (or (plist-get processing-info :message) "")))
@@ -1573,7 +1598,7 @@ fragments are regenerated."
             (org-latex-preview--display-info
              extended-info bad-fragment))))
         ;; Re-generate the remaining fragments.
-        (org-latex-preview-create-image-async
+        (org-latex-preview--create-image-async
          (plist-get extended-info :processor)
          (cdr fragments))
         (setq fragments nil)))))
