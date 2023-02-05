@@ -1448,6 +1448,22 @@ which are given by `org-latex-engraved-preamble' and
        (message "Cannot engrave source blocks. Consider installing `engrave-faces'.")
        "% WARNING syntax highlighting unavailable as engrave-faces-latex was missing."))))
 
+;; Citation features
+
+(org-export-update-features 'latex
+  (bibliography-csl
+   :condition (eq (org-cite-processor info) 'csl)
+   :when bibliography
+   :snippet org-cite-csl--generate-latex-preamble)
+  (bibliography-biblatex
+   :condition (eq (org-cite-processor info) 'biblatex)
+   :when bibliography
+   :snippet org-cite-biblatex--generate-latex-preamble)
+  (bibliography-natbib
+   :condition (eq (org-cite-processor info) 'natbib)
+   :when bibliography
+   :snippet org-cite-natbib--generate-latex-preamble))
+
 ;;;; Compilation
 
 (defcustom org-latex-compiler-file-string "%% Intended LaTeX compiler: %s\n"
