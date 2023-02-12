@@ -375,13 +375,12 @@ INFO is the export state, as a property list."
        (other
         (user-error "Invalid entry %S in `org-cite-biblatex-styles'" other))))))
 
-(defun org-cite-biblatex--generate-latex-preamble (info)
-  "Ensure that the biblatex package is loaded, and the necessary resources.
+(defun org-cite-biblatex--generate-latex-usepackage (info)
+  "Ensure that the biblatex package is loaded.
 This is performed by extracting relevant information from the
 INFO export plist, and modifying any existing
 \\usepackage{biblatex} statement in the LaTeX header."
   (let ((style (org-cite-bibliography-style info))
-        (files (plist-get info :bibliography))
         (usepackage-rx (rx "\\usepackage"
                            (opt (group "[" (*? anything) "]"))
                            "{biblatex}")))
@@ -400,14 +399,17 @@ INFO export plist, and modifying any existing
        ;; with appropriate options, including style.
        (format "\\usepackage%s{biblatex}\n"
                (org-cite-biblatex--package-options
-                org-cite-biblatex-options style)))
-     ;; Load resources.
-     (mapconcat (lambda (f)
-                  (format "\\addbibresource%s{%s}"
-                          (if (org-url-p f) "[location=remote]" "")
-                          f))
-                files
-                "\n"))))
+                org-cite-biblatex-options style))))))
+
+(defun org-cite-biblatex--generate-latex-bibresources (info)
+  "From INFO generate LaTeX that loads the relevant bibliography resource files."
+  (let ((files (plist-get info :bibliography)))
+    (mapconcat (lambda (f)
+                 (format "\\addbibresource%s{%s}"
+                         (if (org-url-p f) "[location=remote]" "")
+                         f))
+               files
+               "\n")))
 
 
 ;;; Register `biblatex' processor

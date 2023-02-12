@@ -1421,6 +1421,7 @@ previews."
                    '(:time-stamp-file nil)))
             org-export-babel-evaluate
             org-export-use-babel
+            org-latex-precompile
             ;; (org-latex-conditional-features
             ;;  (cl-remove-if
             ;;   (lambda (feat)
@@ -1434,12 +1435,16 @@ previews."
          (font-lock-mode -1)
          (setq info
                (org-export--annotate-info (org-export-get-backend 'latex) info))
-         (org-latex-make-preamble
+         (setq
+          the-preamble
+          (org-latex-make-preamble
           (org-combine-plists
            (org-export-get-environment
             (org-export-get-backend 'latex))
            '(:time-stamp-file nil))
-          org-latex-preview-header 'snippet))))))
+          org-latex-preview-header 'snippet))
+         the-preamble
+         )))))
 
 (defun org-latex-preview--create-tex-file (processing-info fragments)
   "Create a LaTeX file based on PROCESSING-INFO and PREVIEW-STRINGS.
@@ -2014,79 +2019,15 @@ according to PROCESSING-INFO and stored.
 
 This is intended to speed up Org's LaTeX preview generation
 process."
-  (let ((preamble-hash
-         (thread-first
-           preamble
-           (concat
-            (prin1-to-string
-             (car (plist-get processing-info :programs)))
-            (plist-get processing-info :latex-processor)
-            (and (string-match-p "\\(?:\\\\input{\\|\\\\include{\\)"
-                                 preamble)
-                 default-directory))
-           (sha1))))
-    (or (cadr
-         (org-persist-read "LaTeX format file cache"
-                           (list :key preamble-hash)
-                           nil nil :read-related t))
-        (when-let ((dump-file
-                    (org-latex-preview--precompile-preamble
-                     processing-info preamble
-                     (expand-file-name preamble-hash temporary-file-directory))))
-          (cadr
-           (org-persist-register `(,"LaTeX format file cache"
-                                   (file ,dump-file))
-                                 (list :key preamble-hash)
-                                 :write-immediately t))))))
-
-(defun org-latex-preview--precompile-preamble (processing-info preamble basepath)
-  "Precompile PREAMBLE with \"mylatexformat\".
-The PREAMBLE string is placed in BASEPATH.tex and compiled
-according to PROCESSING-INFO. If compilation and dumping
-succeeded, BASEPATH.fmt will be returned.
-
-Should any errors occur during compilation, nil will be returned,
-and appropriate warnings may be emitted."
-  (let ((dump-file (concat basepath ".fmt"))
-        (preamble-file (concat basepath ".tex"))
-        (precompile-buffer
-         (with-current-buffer
-             (get-buffer-create org-latex-preview--precompile-log)
-           (erase-buffer)
-           (current-buffer))))
-    (with-temp-file preamble-file
-      (insert preamble "\n\\endofdump\n"))
-    (message "Precompiling Org LaTeX Preview preamble...")
-    (condition-case nil
-        (org-compile-file
-         preamble-file (plist-get processing-info :latex-precompiler)
-         "fmt" nil precompile-buffer
+  (org-latex--precompile
+   (list :latex-compiler (plist-get processing-info :latex-processor)
+         :precompile-format-spec
          (let ((org-tex-compiler
                 (cdr (assoc (plist-get processing-info :latex-processor)
                             org-latex-preview-compiler-command-map))))
            `((?l . ,org-tex-compiler)
              (?L . ,(car (split-string org-tex-compiler))))))
-      (:success
-       (kill-buffer precompile-buffer)
-       (delete-file preamble-file)
-       dump-file)
-      (error
-       (unless (= 0 (call-process "kpsewhich" nil nil nil "mylatexformat.ltx"))
-         (display-warning
-          '(org latex-preview preamble-precompilation)
-          "The LaTeX package \"mylatexformat\" is required for precompilation, but could not be found")
-         :warning)
-       (unless (= 0 (call-process "kpsewhich" nil nil nil "preview.sty"))
-         (display-warning
-          '(org latex-preview preamble-precompilation)
-          "The LaTeX package \"preview\" is required for precompilation, but could not be found")
-         :warning)
-       (display-warning
-        '(org latex-preview preamble-precompilation)
-        (format "Failed to precompile preamble (%s), see the \"%s\" buffer."
-                preamble-file precompile-buffer)
-        :warning)
-       nil))))
+   preamble))
 
 (defun org-latex-preview--tex-styled (processing-type value options &optional html-p)
   "Apply LaTeX style commands to VALUE based on OPTIONS.
