@@ -1065,6 +1065,12 @@ Some of the options can be changed using the variable
            elements)))
     (org-latex-preview-place processing-type entries numbering-offsets)))
 
+;; * Make all the images
+;; (<org-element latex-fragment> . key)...
+
+;; Backend make-an-image
+;; (get-cached-image (alist-get <org-element latex-fragment>))
+
 ;;;###autoload
 (defun org-latex-preview-place (processing-type entries &optional numbering-offsets latex-header)
   "Preview LaTeX math fragments ENTRIES using PROCESSING-TYPE.
@@ -1109,7 +1115,8 @@ is either the substring between BEG and END or (when provided) VALUE."
       (org-latex-preview--create-image-async
        processing-type
        (nreverse fragment-info)
-       latex-header))))
+       :latex-header latex-header
+       :place-preview-p t))))
 
 (defun org-latex-preview--colors-at (pos)
   "Find colors for LaTeX previews to be inserted at POS."
@@ -1240,7 +1247,7 @@ NUMBER is the equation number that should be used, if applicable."
                       (goto-char (org-element-property :begin datum))
                       (org-element-context)))))))))
 
-(defun org-latex-preview--create-image-async (processing-type fragments-info &optional latex-processor latex-header)
+(cl-defun org-latex-preview--create-image-async (processing-type fragments-info &key latex-processor latex-header place-preview-p)
   "Preview PREVIEW-STRINGS asynchronously with method PROCESSING-TYPE.
 
 FRAGMENTS-INFO is a list of plists, each of which provides
@@ -1254,6 +1261,10 @@ where
 
 It is worth noting the FRAGMENTS-INFO plists will be modified
 during processing to hold more information on the fragments.
+
+When PLACE-PREVIEW-P is true, it will be set in the extended info
+plist passed to filters, and is expected to result in the newly
+generated fragment image being placed in the buffer.
 
 LATEX-PROCESSOR is a member of `org-latex-compilers' which is guessed if unset."
   (let* ((processing-type
@@ -1344,7 +1355,8 @@ LATEX-PROCESSOR is a member of `org-latex-compilers' which is guessed if unset."
                           :fragments fragments-info
                           :org-buffer (current-buffer)
                           :texfile (org-latex-preview--create-tex-file
-                                    processing-info fragments-info))))
+                                    processing-info fragments-info)
+                          :place-preview-p place-preview-p)))
            (tex-compile-async
             (org-latex-preview--tex-compile-async extended-info))
            (img-extract-async
@@ -1623,14 +1635,16 @@ The path of the created LaTeX file is returned."
        for fragment-info in (plist-get extended-info :fragments)
        for image-file in images
        for ov = (plist-get fragment-info :overlay)
-       do (plist-put fragment-info :path image-file)
-       (org-latex-preview--update-overlay
-        ov
-        (org-latex-preview--cache-image
-         (plist-get fragment-info :key)
-         image-file
-         (org-latex-preview--display-info
-          extended-info fragment-info)))))))
+       for cached-img =
+       (org-latex-preview--cache-image
+        (plist-get fragment-info :key)
+        image-file
+        (org-latex-preview--display-info
+         extended-info fragment-info))
+       do
+       (plist-put fragment-info :path image-file)
+       (when (plist-get extended-info :place-preview-p)
+         (org-latex-preview--update-overlay ov cached-img))))))
 
 (defun org-latex-preview--check-all-fragments-produced (_exit-code _stdout extended-info)
   "Check each of the fragments in EXTENDED-INFO has a path.
@@ -1663,21 +1677,24 @@ fragments are regenerated."
         ;; Re-generate the remaining fragments.
         (org-latex-preview--create-image-async
          (plist-get extended-info :processor)
-         (cdr fragments))
+         (cdr fragments)
+         :place-preview-p t)
         (setq fragments nil)))))
 
 (defun org-latex-preview--display-info (extended-info fragment-info)
   "From FRAGMENT-INFO and EXTENDED-INFO obtain display-relevant information."
   (let ((image-type (intern (plist-get extended-info :image-output-type)))
-        (fontsize (or (plist-get extended-info :fontsize) 10))
         (dpi-factor (or (plist-get extended-info :dpi-scale-factor) 1.0))
         info)
     (setq info (plist-put info :image-type image-type))
     (dolist (key '(:width :height :depth))
       (when-let ((val (plist-get fragment-info key)))
-        (plist-put info key (/ val fontsize dpi-factor))))
+        (plist-put info key (/ val dpi-factor))))
     (plist-put info :errors (plist-get fragment-info :errors))
     info))
+
+(defconst org-latex-preview--tex-scale-divisor 65781.76
+  "The ratio between ")
 
 (defun org-latex-preview--latex-preview-filter (_proc _string extended-info)
   "Examine the stdout from LaTeX compilation with preview.sty.
@@ -1691,7 +1708,7 @@ fragments in EXTENDED-INFO."
   (let ((preview-start-re
          "^! Preview: Snippet \\([0-9]+\\) started.\n<-><->\n *\nl\\.\\([0-9]+\\)[^\n]+\n")
         (preview-end-re
-         "\\(?:^Preview: Tightpage.*$\\)?\n! Preview: Snippet [0-9]+ ended.")
+         "\\(?:^Preview: Tightpage.*$\\)?\n! Preview: Snippet [0-9]+ ended.(\\([0-9]+\\)+\\([0-9]+\\)x\\([0-9]+\\))")
         (fragments (plist-get extended-info :fragments))
         preview-marks)
     (beginning-of-line)
@@ -1711,6 +1728,13 @@ fragments in EXTENDED-INFO."
                  (string-trim
                   (buffer-substring (cadar preview-marks)
                                     (match-beginning 0)))))
+            (cl-loop for (geom . match-index)
+                     in '((:height . 1) (:depth . 2) (:width . 3))
+                     do
+                     (plist-put fragment-info geom
+                                (/ (string-to-number (match-string match-index))
+                                   org-latex-preview--tex-scale-divisor
+                                   (or (plist-get fragment-info :fontsize) 10))))
             (plist-put fragment-info :errors
                        (and (not (string-blank-p errors-substring))
                             (replace-regexp-in-string
@@ -1728,8 +1752,8 @@ fragments in EXTENDED-INFO."
 Any matches found will be matched against the fragments recorded in
 EXTENDED-INFO, and displayed in the buffer."
   (let ((dvisvgm-processing-re "^processing page \\([0-9]+\\)\n")
-        (dvisvgm-depth-re "depth=\\([0-9.]+\\)pt$")
-        (dvisvgm-size-re "^ *graphic size: \\([0-9.]+\\)pt x \\([0-9.]+\\)pt")
+        ;; (dvisvgm-depth-re "depth=\\([0-9.]+\\)pt$")
+        ;; (dvisvgm-size-re "^ *graphic size: \\([0-9.]+\\)pt x \\([0-9.]+\\)pt")
         (fragments (plist-get extended-info :fragments))
         page-marks fragments-to-show)
     (beginning-of-line)
@@ -1749,12 +1773,12 @@ EXTENDED-INFO, and displayed in the buffer."
                 (re-search-forward "output written to \\(.*.svg\\)$" end t))
           (setq fragment-info (nth (1- page) fragments))
           (plist-put fragment-info :path (match-string 1))
-          (when (save-excursion
-                  (re-search-forward dvisvgm-depth-re end t))
-            (plist-put fragment-info :depth (string-to-number (match-string 1))))
-          (when (save-excursion (re-search-forward dvisvgm-size-re end t))
-            (plist-put fragment-info :height (string-to-number (match-string 2)))
-            (plist-put fragment-info :width (string-to-number (match-string 1))))
+          ;; (when (save-excursion
+          ;;         (re-search-forward dvisvgm-depth-re end t))
+          ;;   (plist-put fragment-info :depth (string-to-number (match-string 1))))
+          ;; (when (save-excursion (re-search-forward dvisvgm-size-re end t))
+          ;;   (plist-put fragment-info :height (string-to-number (match-string 2)))
+          ;;   (plist-put fragment-info :width (string-to-number (match-string 1))))
           (when (save-excursion
                   (re-search-forward "^  page is empty" end t))
             (unless (plist-get fragment-info :error)
@@ -1771,9 +1795,18 @@ EXTENDED-INFO, and displayed in the buffer."
       ;; to be a bit safer this we use 5x that here.
       (run-at-time
        0.01 nil
-       (lambda (frags)
-         (mapc #'org-latex-preview--svg-make-fg-currentColor frags)
-         (org-latex-preview--place-images extended-info frags))
+       (if (plist-get extended-info :place-preview-p)
+           (lambda (fragments)
+             (mapc #'org-latex-preview--svg-make-fg-currentColor fragments)
+             (org-latex-preview--place-images extended-info fragments))
+         (lambda (fragments)
+           (mapc #'org-latex-preview--svg-make-fg-currentColor fragments)
+           (dolist (fragment-info fragments)
+             (org-latex-preview--cache-image
+              (plist-get fragment-info :key)
+              (plist-get fragment-info :path)
+              (org-latex-preview--display-info
+               extended-info fragment-info)))))
        fragments-to-show))))
 
 (defun org-latex-preview--svg-make-fg-currentColor (svg-fragment)
@@ -1832,7 +1865,7 @@ reported values in pt (8.899pt).")
   "Look for newly created images in the dvipng stdout buffer.
 Any matches found will be matched against the fragments recorded in
 EXTENDED-INFO, and displayed in the buffer."
-  (let ((dvipng-depth-height-re "depth=\\([0-9]+\\) height=\\([0-9]+\\)")
+  (let (;; (dvipng-depth-height-re "depth=\\([0-9]+\\) height=\\([0-9]+\\)")
         (outputs-no-ext (expand-file-name
                          (file-name-base
                           (plist-get extended-info :texfile))
@@ -1848,17 +1881,24 @@ EXTENDED-INFO, and displayed in the buffer."
                    (fragment-info (nth (1- page) fragments)))
               (plist-put fragment-info :path
                          (format "%s-%09d.png" outputs-no-ext page))
-              (when (re-search-forward dvipng-depth-height-re page-info-end t)
-                (let ((depth (* (string-to-number (match-string 1))
-                                org-latex-preview--dvipng-dpi-pt-factor))
-                      (height (* (string-to-number (match-string 2))
-                                 org-latex-preview--dvipng-dpi-pt-factor)))
-                  (plist-put fragment-info :depth depth)
-                  (plist-put fragment-info :height (+ depth height))))
+              ;; (when (re-search-forward dvipng-depth-height-re page-info-end t)
+              ;;   (let ((depth (* (string-to-number (match-string 1))
+              ;;                   org-latex-preview--dvipng-dpi-pt-factor))
+              ;;         (height (* (string-to-number (match-string 2))
+              ;;                    org-latex-preview--dvipng-dpi-pt-factor)))
+              ;;     (plist-put fragment-info :depth depth)
+              ;;     (plist-put fragment-info :height (+ depth height))))
               (push fragment-info fragments-to-show)))))
     (when fragments-to-show
       (setq fragments-to-show (nreverse fragments-to-show))
-      (org-latex-preview--place-images extended-info fragments-to-show))))
+      (if (plist-get extended-info :place-preview-p)
+          (org-latex-preview--place-images extended-info fragments-to-show)
+        (dolist (fragment-info fragments)
+          (org-latex-preview--cache-image
+           (plist-get fragment-info :key)
+           (plist-get fragment-info :path)
+           (org-latex-preview--display-info
+            extended-info fragment-info)))))))
 
 (defun org-latex-preview--place-images (extended-info &optional fragments)
   "Place images for each of FRAGMENTS, according to their data and EXTENDED-INFO.
